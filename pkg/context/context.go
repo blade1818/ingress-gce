@@ -43,6 +43,17 @@ type ControllerContext struct {
 
 	// Map of namespace => record.EventRecorder.
 	recorders map[string]record.EventRecorder
+
+	MCContext MultiClusterContext
+}
+
+// MultiClusterContext holds informers for operating in MCI mode
+type MultiClusterContext struct {
+
+	// TODO(rramkumar): Add Cluster Registry client and Cluster informers here too
+
+	MCIEnabled                bool
+	DownstreamServiceInfomers []cache.SharedIndexInformer
 }
 
 // NewControllerContext returns a new shared set of informers.
@@ -110,3 +121,9 @@ func (ctx *ControllerContext) Start(stopCh chan struct{}) {
 		go ctx.EndpointInformer.Run(stopCh)
 	}
 }
+
+func (ctx *ControllerContext) MCIEnabled() {
+	return ctx.MCContext.MCIEnabled
+}
+
+func (ctx *ControllerContext)

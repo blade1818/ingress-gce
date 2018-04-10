@@ -44,8 +44,8 @@ import (
 	"k8s.io/ingress-gce/pkg/utils"
 )
 
-// BackendInfo is an interface to return information about the backends.
-type BackendInfo interface {
+// BackendInfoProvider is an interface to return information about the backends.
+type BackendInfoProvider interface {
 	BackendServiceForPort(port int64) (*compute.BackendService, error)
 	DefaultBackendNodePort() *backends.ServicePort
 }
@@ -54,42 +54,35 @@ type recorderSource interface {
 	Recorder(ns string) record.EventRecorder
 }
 
-// New returns a new ControllerContext.
-func New(recorders recorderSource, bi BackendInfo, svcLister cache.Indexer, nodeLister cache.Indexer, podLister cache.Indexer, endpointLister cache.Indexer, negEnabled bool) *GCE {
-	return &GCE{
+// New returns a new Translator.
+func NewTranslator(recorders recorderSource, beInfo BackendInfoProvider, ctx *context.ControllerContext, negEnabled bool) *GCE {
+	return &Translator{
 		recorders,
-		bi,
-		svcLister,
-		nodeLister,
-		podLister,
-		endpointLister,
+		beInfo,
+		ctx
 		negEnabled,
 	}
 }
 
-// GCE helps with kubernetes -> gce api conversion.
-type GCE struct {
-	recorders recorderSource
-
-	bi             BackendInfo
-	svcLister      cache.Indexer
-	nodeLister     cache.Indexer
-	podLister      cache.Indexer
-	endpointLister cache.Indexer
+// Translator helps with kubernetes -> gce api conversion.
+type Translator struct {
+	recorders      recorderSource
+	beInfo         BackendInfoProvider,
+	ctx            *context.ControllerContext
 	negEnabled     bool
 }
 
-// ToURLMap converts an ingress to a map of subdomain: url-regex: gce backend.
-func (t *GCE) ToURLMap(ing *extensions.Ingress) (utils.GCEURLMap, error) {
-	hostPathBackend := utils.GCEURLMap{}
+// ToURLMap converts an Ingress to a map of subdomain: url-regex: gce backend.
+func (t *Translator) ToURLMap(ing *extensions.Ingress) (utils.GCEURLMap, error) {
+	urlMap := utils.GCEURLMap{}
 	for _, rule := range ing.Spec.Rules {
 		if rule.HTTP == nil {
 			glog.Errorf("Ignoring non http Ingress rule")
 			continue
 		}
-		pathToBackend := map[string]*compute.BackendService{}
+		pathToBackendMap := map[string]*compute.BackendService{}
 		for _, p := range rule.HTTP.Paths {
-			backend, err := t.toGCEBackend(&p.Backend, ing.Namespace)
+			backendService, err := t.toGCEBackendService(&p.Backend, ing.Namespace)
 			if err != nil {
 				// If a service doesn't have a nodeport we can still forward traffic
 				// to all other services under the assumption that the user will
@@ -111,7 +104,7 @@ func (t *GCE) ToURLMap(ing *extensions.Ingress) (utils.GCEURLMap, error) {
 			if path == "" {
 				path = loadbalancers.DefaultPath
 			}
-			pathToBackend[path] = backend
+			pathToBackend[path] = backendService
 		}
 		// If multiple hostless rule sets are specified, last one wins
 		host := rule.Host
@@ -142,7 +135,8 @@ func (t *GCE) ToURLMap(ing *extensions.Ingress) (utils.GCEURLMap, error) {
 	return hostPathBackend, nil
 }
 
-func (t *GCE) toGCEBackend(be *extensions.IngressBackend, ns string) (*compute.BackendService, error) {
+// toGCEBackendService
+func (t *Translator) toGCEBackendService(be *extensions.IngressBackend, ns string) (*compute.BackendService, error) {
 	if be == nil {
 		return nil, nil
 	}
@@ -159,67 +153,41 @@ func (t *GCE) toGCEBackend(be *extensions.IngressBackend, ns string) (*compute.B
 
 // getServiceNodePort looks in the svc store for a matching service:port,
 // and returns the nodeport.
-func (t *GCE) getServiceNodePort(be extensions.IngressBackend, namespace string) (backends.ServicePort, error) {
-	obj, exists, err := t.svcLister.Get(
-		&api_v1.Service{
-			ObjectMeta: meta_v1.ObjectMeta{
-				Name:      be.ServiceName,
-				Namespace: namespace,
-			},
-		})
-	if !exists {
-		return backends.ServicePort{}, errors.ErrNodePortNotFound{
-			Backend: be,
-			Err:     fmt.Errorf("service %v/%v not found in store", namespace, be.ServiceName),
-		}
-	}
+func (t *Translator) getServiceNodePort(be extensions.IngressBackend, namespace string) ([]backends.ServicePort, error) {
+	svcPorts := make([]backends.ServicePort, 0)
+	svcs, err := getK8sServicesForIngressBackend()
 	if err != nil {
+		// TODO(rramkumar): Find a better error.
 		return backends.ServicePort{}, errors.ErrNodePortNotFound{Backend: be, Err: err}
 	}
-	svc := obj.(*api_v1.Service)
-	appProtocols, err := annotations.FromService(svc).ApplicationProtocols()
-	if err != nil {
-		return backends.ServicePort{}, errors.ErrSvcAppProtosParsing{Svc: svc, Err: err}
-	}
 
-	var port *api_v1.ServicePort
-PortLoop:
-	for _, p := range svc.Spec.Ports {
-		np := p
-		switch be.ServicePort.Type {
-		case intstr.Int:
-			if p.Port == be.ServicePort.IntVal {
-				port = &np
-				break PortLoop
-			}
-		default:
-			if p.Name == be.ServicePort.StrVal {
-				port = &np
-				break PortLoop
+	for _, svc := range svcs {
+		nodePort, err := getNodePortForIngressBackend(be, svc)
+		if err != nil {
+			return backends.ServicePort{}, errors.ErrNodePortNotFound{
+				Backend: be,
+				Err:     err,
 			}
 		}
-	}
-
-	if port == nil {
-		return backends.ServicePort{}, errors.ErrNodePortNotFound{
-			Backend: be,
-			Err:     fmt.Errorf("could not find matching nodeport from service"),
+		appProtocols, err := annotations.FromService(svc).ApplicationProtocols()
+		if err != nil {
+			return backends.ServicePort{}, errors.ErrSvcAppProtosParsing{Svc: svc, Err: err}
 		}
+		proto := annotations.ProtocolHTTP
+		if protoStr, exists := appProtocols[port.Name]; exists {
+			proto = annotations.AppProtocol(protoStr)
+		}
+		p := backends.ServicePort{
+			NodePort:      int64(port.NodePort),
+			Protocol:      proto,
+			SvcName:       types.NamespacedName{Namespace: namespace, Name: be.ServiceName},
+			SvcPort:       be.ServicePort,
+			SvcTargetPort: port.TargetPort.String(),
+			NEGEnabled:    t.negEnabled && annotations.FromService(svc).NEGEnabled(),
+		}
+		svcPorts = append(svcPorts, p)
 	}
 
-	proto := annotations.ProtocolHTTP
-	if protoStr, exists := appProtocols[port.Name]; exists {
-		proto = annotations.AppProtocol(protoStr)
-	}
-
-	p := backends.ServicePort{
-		NodePort:      int64(port.NodePort),
-		Protocol:      proto,
-		SvcName:       types.NamespacedName{Namespace: namespace, Name: be.ServiceName},
-		SvcPort:       be.ServicePort,
-		SvcTargetPort: port.TargetPort.String(),
-		NEGEnabled:    t.negEnabled && annotations.FromService(svc).NEGEnabled(),
-	}
 	return p, nil
 }
 

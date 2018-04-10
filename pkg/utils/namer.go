@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"crypto/sha256"
+
 	"github.com/golang/glog"
 )
 
