@@ -20,7 +20,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kr/pretty"
 	"k8s.io/api/extensions/v1beta1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/ingress-gce/pkg/e2e"
@@ -36,25 +35,18 @@ func TestBasic(t *testing.T) {
 	for _, tc := range []struct {
 		desc string
 		ing  *v1beta1.Ingress
-
-		numForwardingRules int
-		numBackendServices int
 	}{
 		{
 			desc: "http default backend",
 			ing: fuzz.NewIngressBuilder("", "ingress-1", "").
 				DefaultBackend("service-1", port80).
 				Build(),
-			numForwardingRules: 1,
-			numBackendServices: 1,
 		},
 		{
 			desc: "http one path",
 			ing: fuzz.NewIngressBuilder("", "ingress-1", "").
 				AddPath("test.com", "/", "service-1", port80).
 				Build(),
-			numForwardingRules: 1,
-			numBackendServices: 2,
 		},
 		{
 			desc: "http multiple paths",
@@ -62,8 +54,6 @@ func TestBasic(t *testing.T) {
 				AddPath("test.com", "/foo", "service-1", port80).
 				AddPath("test.com", "/bar", "service-1", port80).
 				Build(),
-			numForwardingRules: 1,
-			numBackendServices: 2,
 		},
 	} {
 		tc := tc // Capture tc as we are running this in parallel.
@@ -89,7 +79,6 @@ func TestBasic(t *testing.T) {
 			}
 			t.Logf("GCLB resources createdd (%s/%s)", s.Namespace, tc.ing.Name)
 
-			// Perform whitebox testing.
 			if len(ing.Status.LoadBalancer.Ingress) < 1 {
 				t.Fatalf("Ingress does not have an IP: %+v", ing.Status)
 			}
@@ -101,12 +90,8 @@ func TestBasic(t *testing.T) {
 				t.Fatalf("Error getting GCP resources for LB with IP = %q: %v", vip, err)
 			}
 
-			// Do some cursory checks on the GCP objects.
-			if len(gclb.ForwardingRule) != tc.numForwardingRules {
-				t.Errorf("got %d fowarding rules, want %d;\n%s", len(gclb.ForwardingRule), tc.numForwardingRules, pretty.Sprint(gclb.ForwardingRule))
-			}
-			if len(gclb.BackendService) != tc.numBackendServices {
-				t.Errorf("got %d backend services, want %d;\n%s", len(gclb.BackendService), tc.numBackendServices, pretty.Sprint(gclb.BackendService))
+			if err := e2e.PerformWhiteboxTests(s, tc.ing, gclb); err != nil {
+				t.Fatalf("Error performing whitebox tests: %v", err)
 			}
 
 			deleteOptions := &fuzz.GCLBDeleteOptions{

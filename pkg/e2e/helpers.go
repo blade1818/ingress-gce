@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/ingress-gce/pkg/fuzz"
 	"k8s.io/ingress-gce/pkg/fuzz/features"
+	"k8s.io/ingress-gce/pkg/fuzz/whitebox"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/gce/cloud"
 )
 
@@ -53,7 +54,7 @@ func WaitForIngress(s *Sandbox, ing *v1beta1.Ingress, options *WaitForIngressOpt
 		if err != nil {
 			return true, err
 		}
-		validator, err := fuzz.NewIngressValidator(s.ValidatorEnv, ing, features.All, nil)
+		validator, err := fuzz.NewIngressValidator(s.ValidatorEnv, ing, features.All, []fuzz.WhiteboxTest{}, nil)
 		if err != nil {
 			return true, err
 		}
@@ -68,6 +69,15 @@ func WaitForIngress(s *Sandbox, ing *v1beta1.Ingress, options *WaitForIngressOpt
 		}
 	})
 	return ing, err
+}
+
+// PerformWhiteboxTests runs the whitebox tests against the Ingress. 
+func PerformWhiteboxTests(s *Sandbox, ing *v1beta1.Ingress, gclb *fuzz.GCLB) error {
+	validator, err := fuzz.NewIngressValidator(s.ValidatorEnv, ing, []fuzz.Feature{}, whitebox.AllTests, nil)
+	if err != nil {
+		return err
+	}
+	return validator.PerformWhiteboxTests(gclb)
 }
 
 // WaitForIngressDeletion deletes the given ingress and waits for the

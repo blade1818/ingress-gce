@@ -21,7 +21,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kr/pretty"
 	"k8s.io/api/extensions/v1beta1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/ingress-gce/pkg/e2e"
@@ -38,16 +37,12 @@ func TestUpgrade(t *testing.T) {
 		desc string
 		ing  *v1beta1.Ingress
 
-		numForwardingRules int
-		numBackendServices int
 	}{
 		{
 			desc: "http default backend",
 			ing: fuzz.NewIngressBuilder("", "ingress-1", "").
 				DefaultBackend("service-1", port80).
 				Build(),
-			numForwardingRules: 1,
-			numBackendServices: 1,
 		},
 	} {
 		tc := tc // Capture tc as we are running this in parallel.
@@ -116,7 +111,6 @@ func TestUpgrade(t *testing.T) {
 					t.Logf("GCLB is stable (%s/%s)", s.Namespace, tc.ing.Name)
 				}
 
-				// Perform whitebox testing.
 				if len(ing.Status.LoadBalancer.Ingress) < 1 {
 					t.Fatalf("Ingress does not have an IP: %+v", ing.Status)
 				}
@@ -126,14 +120,6 @@ func TestUpgrade(t *testing.T) {
 				gclb, err := fuzz.GCLBForVIP(context.Background(), Framework.Cloud, vip, fuzz.FeatureValidators(features.All))
 				if err != nil {
 					t.Fatalf("Error getting GCP resources for LB with IP = %q: %v", vip, err)
-				}
-
-				// Do some cursory checks on the GCP objects.
-				if len(gclb.ForwardingRule) != tc.numForwardingRules {
-					t.Errorf("got %d fowarding rules, want %d;\n%s", len(gclb.ForwardingRule), tc.numForwardingRules, pretty.Sprint(gclb.ForwardingRule))
-				}
-				if len(gclb.BackendService) != tc.numBackendServices {
-					t.Errorf("got %d backend services, want %d;\n%s", len(gclb.BackendService), tc.numBackendServices, pretty.Sprint(gclb.BackendService))
 				}
 
 				runs++
